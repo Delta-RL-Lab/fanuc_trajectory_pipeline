@@ -12,10 +12,8 @@ Key differences from the original version:
   - CNT column accepts 'FINE', 'CNT0' .. 'CNT100'  (any valid FANUC term).
 """
 
-import numpy as np
 
-
-def generate_ls_cart(filename, waypoints_df, prog_name='TRAJ1'):
+def generate_ls_cart(filename, waypoints_df, prog_name="TRAJ1", tool_number=8):
     """
     Write a FANUC .LS Cartesian motion program.
 
@@ -30,26 +28,19 @@ def generate_ls_cart(filename, waypoints_df, prog_name='TRAJ1'):
         Positions in mm, orientations in degrees.
     prog_name : str
         Program name written into the LS header and /PROG line.
+    tool_number : int
+        FANUC tool number written into the Cartesian position records.
     """
 
     n_points = len(waypoints_df)
-
-    # Total instruction lines: TIMER RESET + TIMER START + n motion lines
-    #                          + TIMER STOP + END  =  n + 4
     line_count = n_points + 4
-
     config_string = "'F, , 0, 0'"
-    
-    tool_number = 8 # 8 for real
-    # tool_number = 1 # 1 for simulation (ROBOGUIDE)
 
-    with open(filename, 'w') as f:
-
-        # ── HEADER ────────────────────────────────────────────────────────────
+    with open(filename, "w") as f:
         f.write(f"/PROG  {prog_name}\n")
         f.write("/ATTR\n")
         f.write("OWNER\t\t= MNEDITOR;\n")
-        f.write("COMMENT\t\t= \"Generated\";\n")
+        f.write('COMMENT\t\t= "Generated";\n')
         f.write("PROG_SIZE\t= 0;\n")
         f.write(f"FILE_NAME\t= {prog_name};\n")
         f.write("VERSION\t\t= 0;\n")
@@ -69,29 +60,27 @@ def generate_ls_cart(filename, waypoints_df, prog_name='TRAJ1'):
         f.write("/APPL\n")
         f.write("/MN\n")
 
-        # ── MOTION INSTRUCTIONS ───────────────────────────────────────────────
         f.write("   1:  L P[1] 50mm/sec FINE        ;\n")
         f.write("   2:  WAIT 10.00(sec)    ;\n")
         f.write("   3:  TIMER[1]=RESET    ;\n")
         f.write("   4:  TIMER[1]=START    ;\n")
 
-        for idx, row in waypoints_df.iterrows():
-            line_no  = row['point_index'] + 4          # offset by 2 header lines
-            pt_no    = int(row['point_index'])
-            velocity = int(row['velocity_mms'])
-            term     = row['cnt']                       # e.g. 'FINE', 'CNT100'
+        for _, row in waypoints_df.iterrows():
+            line_no = row["point_index"] + 4
+            pt_no = int(row["point_index"])
+            velocity = int(row["velocity_mms"])
+            term = row["cnt"]
             f.write(f"   {line_no}:L P[{pt_no}] {velocity}mm/sec {term}    ;\n")
 
         f.write(f"   {n_points + 5}:  TIMER[1]=STOP    ;\n")
         f.write(f"   {n_points + 6}:  END    ;\n")
 
-        # ── POSITION RECORDS ─────────────────────────────────────────────────
         f.write("/POS\n")
 
         for _, row in waypoints_df.iterrows():
-            pt_no = int(row['point_index'])
-            x, y, z = row['x'], row['y'], row['z']
-            w, p, r = row['w'], row['p'], row['r']
+            pt_no = int(row["point_index"])
+            x, y, z = row["x"], row["y"], row["z"]
+            w, p, r = row["w"], row["p"], row["r"]
 
             f.write(f"P[{pt_no}]{{\n")
             f.write("   GP1:\n")

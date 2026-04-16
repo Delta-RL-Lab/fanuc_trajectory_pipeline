@@ -1,84 +1,131 @@
+"""
+ascii_convert_joint.py
+----------------------
+Generates a FANUC .LS ASCII teach-pendant program that reuses the
+preprocessed Cartesian waypoint table, but emits JOINT motion commands.
+
+The trajectory data itself is preserved from preprocess_trajectory:
+  - Cartesian P[...] records are written directly from x/y/z/w/p/r.
+  - Per-point velocity_mms values are scaled to FANUC joint percentages.
+  - CNT/FINE termination terms are read from the existing 'cnt' column.
+"""
+
 import numpy as np
-from datetime import datetime
 
-def ascii_convert(filename, q_deg):
+
+def _scale_joint_percentages(waypoints_df):
     """
-    Converts a trajectory matrix into a FANUC LS ASCII file.
-    
-    Args:
-        filename (str): Output path (e.g., 'TRAJTEST.LS')
-        q_deg (np.ndarray): N x 6 array of joint angles in degrees
+    Scale the existing velocity_mms profile into FANUC joint percentages.
+
+    The maximum velocity in the file maps to 100%, with all other points
+    scaled proportionally and clamped into the valid 1..100 range.
     """
-    prog_name = 'TRAJTEST'
-    group_num = 1
-    n_points = q_deg.shape[0]
-    speed_percent = 100
-    
-    # Ensure q_deg is a numpy array
-    q_deg = np.array(q_deg)
-    
-    # Line count logic from original MATLAB code: N + 2 lines total
-    # Note: The original code logic skips P[2] and P[3] in the motion section.
-    line_count = n_points + 2
 
-    try:
-        with open(filename, 'w') as f:
-            # -------- HEADER --------
-            f.write(f"/PROG  {prog_name}\n")
-            f.write("/ATTR\n")
-            f.write("OWNER        = MNEDITOR;\n")
-            f.write("COMMENT      = \"Generated from Python\";\n")
-            f.write("PROG_SIZE    = 0;\n")
-            f.write("CREATE       = DATE 00-00-00  TIME 00:00:00;\n")
-            f.write("MODIFIED     = DATE 00-00-00  TIME 00:00:00;\n")
-            f.write(f"FILE_NAME    = {prog_name};\n")
-            f.write("VERSION      = 0;\n")
-            f.write(f"LINE_COUNT   = {line_count};\n")
-            f.write("MEMORY_SIZE  = 0;\n")
-            f.write("PROTECT      = READ_WRITE;\n")
-            f.write("TCD:  STACK_SIZE    = 0,\n")
-            f.write("      TASK_PRIORITY = 50,\n")
-            f.write("      TIME_SLICE    = 0,\n")
-            f.write("      BUSY_LAMP_OFF = 0,\n")
-            f.write("      ABORT_REQUEST = 0,\n")
-            f.write("      PAUSE_REQUEST = 0;\n")
-            f.write(f"DEFAULT_GROUP   = {group_num},*,*,*,*;\n")
-            f.write("CONTROL_CODE    = 00000000 00000000;\n")
-            f.write("/APPL\n")
-            f.write("/MN\n")
-            
-            # --------- TIMER -------------
-            f.write("   1:  TIMER[1]=RESET;\n")
-            f.write("   2:  TIMER[1]=START;\n")
-            
-            # -------- MOTION LINES --------
-            # Line 3: Move to first point
-            f.write(f"   3:  J P[1] {speed_percent}% FINE ;\n")
-            
-            # Following the MATLAB logic: starts loop at line 4 through N
-            for i in range(4, n_points + 1):
-                f.write(f"   {i}:  J P[{i}] {speed_percent}% FINE ;\n")
-            
-            f.write(f"   {n_points + 1}:  TIMER[1]=STOP;\n")
-            f.write(f"   {n_points + 2}:  END ;\n")
-            
-            # -------- POSITIONS --------
-            f.write("/POS\n")
-            for i in range(n_points):
-                joints = q_deg[i, :]
-                point_id = i + 1  # 1-based indexing for the robot
-                f.write(f"P[{point_id}]{{\n")
-                f.write("   GP1:\n")
-                f.write("    UF : 0, UT : 1,\n")
-                f.write(f"    J1 = {joints[0]:8.3f} deg, J2 = {joints[1]:8.3f} deg, J3 = {joints[2]:8.3f} deg,\n")
-                f.write(f"    J4 = {joints[3]:8.3f} deg, J5 = {joints[4]:8.3f} deg, J6 = {joints[5]:8.3f} deg \n")
-                f.write("};\n")
-                
-            f.write("/END\n")
-            
-    except IOError as e:
-        print(f"Could not open file {filename}: {e}")
+    velocities = np.asarray(waypoints_df["velocity_mms"], dtype=float)
+    if velocities.size == 0:
+        return np.array([], dtype=int)
 
-# Example Usage:
-# data = np.random.uniform(-90, 90, (10, 6))
-# ascii_convert('TEST.LS', data)
+    max_velocity = np.nanmax(velocities)
+    if not np.isfinite(max_velocity) or max_velocity <= 0:
+        return np.ones_like(velocities, dtype=int)
+
+    scaled = np.rint((velocities / max_velocity) * 100.0)
+    return np.clip(scaled, 1, 100).astype(int)
+
+
+def ascii_convert(filename, waypoints_df, prog_name="TRAJ1", tool_number=8):
+    """
+    Write a FANUC .LS motion program that uses J instructions while keeping
+    Cartesian position records.
+
+    Parameters
+    ----------
+    filename : str
+        Output .LS file path.
+    waypoints_df : pd.DataFrame
+        Preprocessed waypoint table with columns:
+            point_index, timestep_ms, x, y, z, w, p, r,
+            velocity_mms, cnt
+    prog_name : str
+        Program name written into the LS header and /PROG line.
+    tool_number : int
+        FANUC tool number written into the Cartesian position records.
+    """
+
+    required_columns = {
+        "point_index",
+        "x",
+        "y",
+        "z",
+        "w",
+        "p",
+        "r",
+        "velocity_mms",
+        "cnt",
+    }
+    missing = required_columns - set(waypoints_df.columns)
+    if missing:
+        raise ValueError(f"Waypoint DataFrame is missing columns: {sorted(missing)}")
+
+    n_points = len(waypoints_df)
+    line_count = n_points + 4
+    config_string = "'F, , 0, 0'"
+    joint_percentages = _scale_joint_percentages(waypoints_df)
+
+    with open(filename, "w") as f:
+        f.write(f"/PROG  {prog_name}\n")
+        f.write("/ATTR\n")
+        f.write("OWNER\t\t= MNEDITOR;\n")
+        f.write('COMMENT\t\t= "Generated";\n')
+        f.write("PROG_SIZE\t= 0;\n")
+        f.write(f"FILE_NAME\t= {prog_name};\n")
+        f.write("VERSION\t\t= 0;\n")
+        f.write(f"LINE_COUNT\t= {line_count};\n")
+        f.write("MEMORY_SIZE\t= 0;\n")
+        f.write("PROTECT\t\t= READ_WRITE;\n")
+        f.write(
+            "TCD:  STACK_SIZE\t= 0,\n"
+            "      TASK_PRIORITY\t= 50,\n"
+            "      TIME_SLICE\t= 0,\n"
+            "      BUSY_LAMP_OFF\t= 0,\n"
+            "      ABORT_REQUEST\t= 0,\n"
+            "      PAUSE_REQUEST\t= 0;\n"
+        )
+        f.write("DEFAULT_GROUP\t= 1,*,*,*,*;\n")
+        f.write("CONTROL_CODE\t= 00000000 00000000;\n")
+        f.write("/APPL\n")
+        f.write("/MN\n")
+
+        f.write("   1:  J P[1] 100% FINE        ;\n")
+        f.write("   2:  WAIT 10.00(sec)    ;\n")
+        f.write("   3:  TIMER[1]=RESET    ;\n")
+        f.write("   4:  TIMER[1]=START    ;\n")
+
+        for speed_percent, (_, row) in zip(joint_percentages, waypoints_df.iterrows()):
+            line_no = int(row["point_index"]) + 4
+            pt_no = int(row["point_index"])
+            term = row["cnt"]
+            f.write(f"   {line_no}:J P[{pt_no}] {speed_percent}% {term}    ;\n")
+
+        f.write(f"   {n_points + 5}:  TIMER[1]=STOP    ;\n")
+        f.write(f"   {n_points + 6}:  END    ;\n")
+
+        f.write("/POS\n")
+
+        for _, row in waypoints_df.iterrows():
+            pt_no = int(row["point_index"])
+            x, y, z = row["x"], row["y"], row["z"]
+            w, p, r = row["w"], row["p"], row["r"]
+
+            f.write(f"P[{pt_no}]{{\n")
+            f.write("   GP1:\n")
+            f.write(f"\tUF : 0, UT : {tool_number},\t\tCONFIG : {config_string},\n")
+            f.write(
+                f"\tX = {x:10.3f}  mm,\tY = {y:10.3f}  mm,\tZ = {z:10.3f}  mm,\n"
+            )
+            f.write(f"\tW = {w:10.3f} deg,\tP = {p:10.3f} deg,\tR = {r:10.3f} deg\n")
+            f.write("};\n")
+
+        f.write("/END\n")
+
+    print(f"  Written {n_points} points to '{filename}'")

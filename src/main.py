@@ -1,31 +1,65 @@
-from pipeline import run_pipeline
+from pathlib import Path
+
+from pipeline import CNT_VALUE, run_pipeline
+from run_manifest import (
+    DEFAULT_LS_OUTPUT_DIR,
+    DEFAULT_MANIFEST_PATH,
+    DEFAULT_MUJOCO_DIR,
+    append_prepared_trajectory_record,
+    ensure_directory,
+    ensure_manifest_parent,
+    resolve_or_allocate_trajectory_id,
+)
 
 
-# ── CONFIGURATION ─────────────────────────────────────────────────────────
+RUNTIME_TARGET = "REAL"
+REMOTE_DIR = "FR:"
+MOVEMENT_TYPE = "JOINT"
 
-# ── SIMULATION x REAL ─────────────────────────────────────────────────────
-ROBOT_IP = '10.147.229.170'   # Real controller (tool_number=8)
-# ROBOT_IP       = '127.0.0.1'    # Simulation (tool_number=1)
 
-# ── DIRECTORY ─────────────────────────────────────────────────────
-REMOTE_DIR     = 'FR:'
+def discover_mujoco_csvs(mujoco_dir=DEFAULT_MUJOCO_DIR):
+    mujoco_dir = Path(mujoco_dir)
+    if not mujoco_dir.exists():
+        raise FileNotFoundError(f"MUJOCO directory not found: {mujoco_dir}")
+    return sorted(mujoco_dir.glob("*.csv"))
 
-# ── SHORT ─────────────────────────────────────────────────────
-CSV_FILE       = '../RL-Trajectory/path_short.csv'
-LOCAL_LS_FILE  = 'TRAJSHORT.LS'
-PROG_NAME      = 'TRAJSHORT'
-run_pipeline(ROBOT_IP, REMOTE_DIR, CSV_FILE, LOCAL_LS_FILE, PROG_NAME)
 
-# ── MEDIUM ─────────────────────────────────────────────────────
-CSV_FILE       = '../RL-Trajectory/path_medium.csv'
-LOCAL_LS_FILE  = 'TRAJMEDIUM.LS'
-PROG_NAME      = 'TRAJMEDIUM'
-run_pipeline(ROBOT_IP, REMOTE_DIR, CSV_FILE, LOCAL_LS_FILE, PROG_NAME)
+def prepare_batch(
+    runtime_target=RUNTIME_TARGET,
+    remote_dir=REMOTE_DIR,
+    movement_type=MOVEMENT_TYPE,
+    cnt_value=CNT_VALUE,
+    mujoco_dir=DEFAULT_MUJOCO_DIR,
+    ls_output_dir=DEFAULT_LS_OUTPUT_DIR,
+    manifest_path=DEFAULT_MANIFEST_PATH,
+):
+    ensure_directory(ls_output_dir)
+    ensure_manifest_parent(manifest_path)
 
-# ── LONG ─────────────────────────────────────────────────────
-CSV_FILE       = '../RL-Trajectory/path_long.csv'
-LOCAL_LS_FILE  = 'TRAJ1LONG.LS'
-PROG_NAME      = 'TRAJ1LONG'
-run_pipeline(ROBOT_IP, REMOTE_DIR, CSV_FILE, LOCAL_LS_FILE, PROG_NAME)
+    prepared_records = []
+    for raw_csv_path in discover_mujoco_csvs(mujoco_dir):
+        trajectory_id = resolve_or_allocate_trajectory_id(raw_csv_path, manifest_path)
+        local_ls_path = Path(ls_output_dir) / f"{trajectory_id}.LS"
 
-print("Starting pipeline...")
+        print(f"Preparing {raw_csv_path.name} as {trajectory_id}...")
+        artifact = run_pipeline(
+            runtime_target,
+            remote_dir,
+            str(raw_csv_path),
+            str(local_ls_path),
+            trajectory_id,
+            movement_type,
+            cnt_value,
+        )
+        prepared_records.append(append_prepared_trajectory_record(artifact, manifest_path))
+
+    return prepared_records
+
+
+def main():
+    records = prepare_batch()
+    print(f"Prepared {len(records)} trajectory program(s).")
+
+
+if __name__ == "__main__":
+    main()
