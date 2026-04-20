@@ -1,91 +1,114 @@
 # FANUC Trajectory Pipeline
 
-Small Python pipeline for converting Cartesian trajectory CSV files into FANUC `.LS` programs and uploading them to a robot controller over FTP.
+This repository converts semicolon-separated trajectory CSV files into FANUC `.LS` programs, applies waypoint preprocessing, uploads the generated program over FTP, and records prepared runs in a JSONL manifest.
 
-## What it does
+## What The Pipeline Does
 
-The pipeline:
+1. Reads raw trajectory CSV files with columns `timestep;x;y;z;w;p;r`.
+2. Computes Cartesian step velocity in `mm/s`.
+3. Quantizes velocity into configurable bands and reduces the trajectory to segment boundaries.
+4. Flips the Z axis and translates the trajectory so the first waypoint lands at a configured target origin.
+5. Generates either a Cartesian `L` motion program or a joint `J` motion program in FANUC `.LS` format.
+6. Uploads the `.LS` file to the selected controller target via FTP.
+7. Appends a `prepared_trajectory` record to `src/config/run_manifest.jsonl`.
 
-1. Loads a semicolon-separated trajectory CSV.
-2. Computes Cartesian velocities from the timestep and XYZ positions.
-3. Quantizes velocity into fixed bands.
-4. Reduces the trajectory to waypoint segment boundaries.
-5. Flips and translates coordinates to a target origin.
-6. Generates a FANUC `.LS` program.
-7. Uploads the generated file to the controller via FTP.
+## Important Defaults
 
-## Requirements
+Review these values before running the batch script:
 
-- Python 3.10+
-- Network access to the FANUC controller if you want to upload files
+- `src/main.py` defaults to `RUNTIME_TARGET = "REAL"`.
+- `src/main.py` defaults to `MOVEMENT_TYPE = "JOINT"`.
+- `src/main.py` defaults to `REMOTE_DIR = "FR:"`.
+- `src/pipeline.py` maps `SIMULATION` to `127.0.0.1` and `REAL` to `10.147.229.170`.
+- `src/run_manifest.py` expects shared folders under `K:\Test Trajectories`.
 
-Install dependencies:
+Running `python src/main.py` will attempt an FTP upload as part of the normal pipeline. Make sure the selected target, IP address, remote directory, and shared-drive paths are correct before running it.
 
-```bash
-pip install -r requirements.txt
-```
+## Input Format
 
-## Input format
-
-Input CSV files must be semicolon-separated and include these columns:
+The preprocessing step expects a semicolon-separated CSV with this header:
 
 ```text
 timestep;x;y;z;w;p;r
 ```
 
-- `timestep` is in milliseconds
-- `x`, `y`, `z` are in millimeters
-- `w`, `p`, `r` are in degrees
+Field meanings:
 
-Sample inputs are included in [`input_data/path_short.csv`](/C:/Users/caldas/Documents/Projects/fanuc_trajectory_pipeline/input_data/path_short.csv), [`input_data/path_medium.csv`](/C:/Users/caldas/Documents/Projects/fanuc_trajectory_pipeline/input_data/path_medium.csv), and [`input_data/path_long.csv`](/C:/Users/caldas/Documents/Projects/fanuc_trajectory_pipeline/input_data/path_long.csv).
+- `timestep`: timestamp in milliseconds
+- `x`, `y`, `z`: Cartesian position in millimeters
+- `w`, `p`, `r`: orientation angles in degrees
 
-## Usage
+Example rows from `input_data/path_short.csv`:
 
-Run from the repository root with Python on the `src` directory in `PYTHONPATH`:
-
-```bash
-$env:PYTHONPATH="src"
-python -c "from pipeline import run_pipeline; run_pipeline('127.0.0.1', 'FR:', 'input_data/path_short.csv', 'TRAJSHORT.LS', 'TRAJSHORT')"
+```text
+timestep;x;y;z;w;p;r
+0;0;-80;-12;-176;1;84
+4;0;-79.999992;-12.6;-176;1;84
+8;0;-80;-13.2;-176;1;84
 ```
 
-Replace:
+## Repository Layout
 
-- `'127.0.0.1'` with your FANUC controller IP
-- `'FR:'` with the target controller directory if needed
-- `'input_data/path_short.csv'` with your source CSV
-- `'TRAJSHORT.LS'` and `'TRAJSHORT'` with your desired output filename and program name
+- `src/main.py`: batch entry point that discovers CSV files, assigns trajectory IDs, runs the pipeline, and writes manifest records.
+- `src/pipeline.py`: orchestration layer that preprocesses input data, generates `.LS`, and uploads it.
+- `src/preprocess_trajectory.py`: velocity quantization, waypoint reduction, Z flip, translation, and CNT assignment.
+- `src/ascii_convert_joint.py`: joint-motion FANUC `.LS` generator using `J` instructions.
+- `src/ascii_convert_cart.py`: Cartesian-motion FANUC `.LS` generator using `L` instructions.
+- `src/upload.py`: FTP upload helper.
+- `src/run_manifest.py`: manifest and ID allocation helpers.
+- `input_data/`: sample CSV trajectories for local reference.
 
-## Using `main.py`
+## Setup
 
-[`src/main.py`](/C:/Users/caldas/Documents/Projects/fanuc_trajectory_pipeline/src/main.py) is set up to run three jobs in sequence, but its CSV paths currently point to `../RL-Trajectory/...`. Update those paths to match files in this repository before using it.
+The code imports `numpy`, `pandas`, and `scipy`.
 
-Example:
-
-```python
-CSV_FILE = 'input_data/path_short.csv'
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 ```
 
-Then run:
+## How To Run
 
-```bash
+### Batch preparation
+
+The default entry point is:
+
+```powershell
 python src/main.py
 ```
 
-## Output
+That command will:
 
-The pipeline generates a FANUC ASCII program file such as `TRAJSHORT.LS` in the working directory and then attempts to upload it with FTP.
+- scan `DEFAULT_MUJOCO_DIR` for `*.csv`
+- generate `.LS` files in `DEFAULT_LS_OUTPUT_DIR`
+- write quantized waypoint CSVs alongside the `.LS` files
+- upload the `.LS` files to the configured FANUC target
+- append records to `src/config/run_manifest.jsonl`
 
-## Project structure
+### Configuration points
 
-```text
-src/
-  main.py
-  pipeline.py
-  preprocess_trajectory.py
-  ascii_convert_cart.py
-  upload.py
-input_data/
-  path_short.csv
-  path_medium.csv
-  path_long.csv
-```
+Update these files when changing behavior:
+
+- `src/main.py`: batch defaults such as runtime target, remote directory, and movement type
+- `src/pipeline.py`: target origin, velocity quantization band, CNT value, and runtime target IP mapping
+- `src/run_manifest.py`: default input, output, and results directories
+
+## Outputs
+
+For each processed trajectory, the pipeline generates:
+
+- a FANUC `.LS` program such as `MJ0001.LS`
+- a quantized waypoint CSV such as `MJ0001_quantized.csv`
+- a manifest record describing the prepared artifact
+
+The manifest currently supports two record types:
+
+- `prepared_trajectory`: written by the batch preparation flow in `src/main.py`
+- `captured_run`: supported by helper functions in `src/run_manifest.py`, but not wired to a top-level script in this repository yet
+
+## Notes
+
+- Sample files in `input_data/` are useful for understanding the CSV format, but `src/main.py` does not read from that folder unless you reconfigure the source directory.
+- The joint-motion export still writes Cartesian `P[...]` position records; it only changes the FANUC motion instructions from `L` to `J`.
+- The final waypoint always receives `FINE`; intermediate waypoints use the configured CNT value.
