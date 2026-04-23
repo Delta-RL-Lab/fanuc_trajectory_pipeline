@@ -39,3 +39,4 @@ Thumbs.db
 
 # Runtime state and generated metadata
 src/config/run_manifest.jsonl
+docs/
